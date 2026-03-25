@@ -1,6 +1,6 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol,
+    contract, contracterror, contractevent, contractimpl, contracttype, symbol_short, Address, Env, Symbol,
 };
 
 /// Error types for the price oracle contract
@@ -10,6 +10,8 @@ use soroban_sdk::{
 pub enum Error {
     /// Asset does not exist in the price oracle
     AssetNotFound = 1,
+    /// Unauthorized caller - not a whitelisted provider
+    Unauthorized = 2,
 }
 
 /// Price data structure containing price information for an asset
@@ -24,6 +26,16 @@ pub struct PriceData {
     pub timestamp: u64,
     /// The source/authority that provided this price
     pub source: Address,
+}
+
+/// Event emitted when a price is updated
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PriceUpdated {
+    pub source: Address,
+    pub asset: Symbol,
+    pub price: i128,
+    pub timestamp: u64,
 }
 
 /// Storage key for the price data map
@@ -99,6 +111,56 @@ impl PriceOracle {
 
         // Store the updated map
         storage.set(&PRICE_DATA_KEY, &prices);
+    }
+
+    /// Update the price for a specific asset (authorized backend relayer function)
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `source` - The address of the authorized backend relayer
+    /// * `asset` - The asset symbol to update
+    /// * `price` - The new price (as i128)
+    pub fn update_price(env: Env, source: Address, asset: Symbol, price: i128) {
+        // Check if the source is a whitelisted provider
+        if !crate::auth::_is_provider(&env, &source) {
+            panic!("Unauthorised: caller is not a whitelisted provider");
+        }
+
+        // Require authentication from the source address
+        source.require_auth();
+
+        // Get the storage instance
+        let storage = env.storage().instance();
+
+        // Get existing prices or create new map
+        let mut prices: soroban_sdk::Map<Symbol, PriceData> = storage
+            .get(&PRICE_DATA_KEY)
+            .unwrap_or_else(|| soroban_sdk::Map::new(&env));
+
+        // Get current timestamp
+        let timestamp = env.ledger().timestamp();
+
+        // Create new price data
+        let price_data = PriceData {
+            asset: asset.clone(),
+            price: price as u64, // Convert i128 to u64 for storage
+            timestamp,
+            source: source.clone(),
+        };
+
+        // Update the price for the asset
+        prices.set(asset.clone(), price_data);
+
+        // Store the updated map
+        storage.set(&PRICE_DATA_KEY, &prices);
+
+        // Emit the PriceUpdated event
+        PriceUpdated {
+            source: source.clone(),
+            asset: asset.clone(),
+            price,
+            timestamp,
+        }.publish(&env);
     }
 }
 

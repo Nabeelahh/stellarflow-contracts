@@ -115,7 +115,6 @@ impl PriceOracle {
 
         prices.set(asset, price_data);
         storage.set(&PRICE_DATA_KEY, &prices);
-        Ok(())
     }
 
     /// Update the price for a specific asset (authorized backend relayer function)
@@ -162,13 +161,8 @@ impl PriceOracle {
         prices.set(asset.clone(), price_data);
         storage.set(&PRICE_DATA_KEY, &prices);
 
-        PriceUpdated {
-            source,
-            asset,
-            price,
-            timestamp,
-        }
-        .publish(&env);
+        env.events()
+            .publish((Symbol::new(&env, "PriceUpdated"), asset.clone()), price);
 
         Ok(())
     }

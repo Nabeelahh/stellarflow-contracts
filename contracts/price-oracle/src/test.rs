@@ -100,7 +100,7 @@ fn test_get_price_existing_asset() {
     env.ledger().set_sequence_number(1);
 
     let asset = symbol_short!("XLM");
-    client.set_price(&asset, &1_000_000_i128, &6u32);
+    client.set_price(&asset, &1_000_000_i128, &6u32, &3600u64);
 
     let retrieved_price = client.get_price(&asset);
     assert_eq!(retrieved_price.price, 1_000_000_i128);
@@ -130,7 +130,7 @@ fn test_get_price_after_update() {
     env.ledger().set_timestamp(1_234_567_890);
     env.ledger().set_sequence_number(1);
     client
-        .try_set_price(&asset, &1_000_000_i128, &6u32)
+        .try_set_price(&asset, &1_000_000_i128, &6u32, &3600u64)
         .unwrap()
         .unwrap();
 
@@ -141,7 +141,7 @@ fn test_get_price_after_update() {
     env.ledger().set_timestamp(1_234_567_900);
     env.ledger().set_sequence_number(2);
     client
-        .try_set_price(&asset, &1_200_000_i128, &6u32)
+        .try_set_price(&asset, &1_200_000_i128, &6u32, &3600u64)
         .unwrap()
         .unwrap();
 
@@ -162,8 +162,8 @@ fn test_get_all_assets_returns_tracked_symbols() {
     let ngn = symbol_short!("NGN");
     let kes = symbol_short!("KES");
 
-    client.set_price(&ngn, &1_500_i128, &2u32);
-    client.set_price(&kes, &800_i128, &2u32);
+    client.set_price(&ngn, &1_500_i128, &2u32, &3600u64);
+    client.set_price(&kes, &800_i128, &2u32, &14400u64);
 
     let assets = client.get_all_assets();
     assert_eq!(assets.len(), 2);
@@ -180,7 +180,7 @@ fn test_set_price_uses_current_ledger_timestamp() {
 
     env.ledger().set_timestamp(1_700_000_123);
     env.ledger().set_sequence_number(77);
-    client.set_price(&asset, &950_i128, &2u32);
+    client.set_price(&asset, &950_i128, &2u32, &3600u64);
 
     let stored = client.get_price(&asset);
     assert_eq!(stored.price, 950_i128);
@@ -206,7 +206,7 @@ fn test_update_price_provider_can_store_new_price() {
 
     env.ledger().set_timestamp(1_700_000_500);
     env.ledger().set_sequence_number(2);
-    client.update_price(&provider, &asset, &1_500_000_i128, &6u32, &100u32);
+    client.update_price(&provider, &asset, &1_500_000_i128, &6u32, &100u32, &3600u64);
 
     let stored = client.get_price(&asset);
     assert_eq!(stored.price, 1_500_000_i128);
@@ -231,8 +231,8 @@ fn test_update_price_multiple_updates() {
         crate::auth::_add_provider(&env, &provider);
     });
 
-    client.update_price(&provider, &asset, &1_000_000_i128, &6u32, &100u32);
-    client.update_price(&provider, &asset, &1_200_000_i128, &6u32, &100u32);
+    client.update_price(&provider, &asset, &1_000_000_i128, &6u32, &100u32, &3600u64);
+    client.update_price(&provider, &asset, &1_200_000_i128, &6u32, &100u32, &3600u64);
 
     let stored = client.get_price(&asset);
     assert_eq!(stored.price, 1_200_000_i128);
@@ -259,6 +259,7 @@ fn test_update_price_unauthorized_rejection() {
         &50_000_000_000_i128,
         &8u32,
         &100u32,
+        &3600u64,
     );
     assert!(result.is_err());
 }
@@ -280,7 +281,7 @@ fn test_update_price_rejects_unapproved_symbol() {
 
     let asset = symbol_short!("ETH");
     let price: i128 = 1_000_000;
-
+, &3600u64
     match client.try_update_price(&provider, &asset, &price, &6u32, &100u32) {
         Err(Ok(e)) => assert_eq!(e, Error::InvalidAssetSymbol),
         other => panic!("expected InvalidAssetSymbol, got {:?}", other),
@@ -305,9 +306,9 @@ fn test_update_price_emits_event() {
         crate::auth::_set_admin(&env, &admin);
         crate::auth::_add_provider(&env, &provider);
     });
-
-    client.set_price(&asset, &old_price);
+, &2u32, &3600u64);
     env.ledger().set_timestamp(1_700_000_000);
+    client.update_price(&provider, &asset, &price, &6u32, &100u32, &3600u64
     client.update_price(&provider, &asset, &price);
 
     // let events = env.events().all();
@@ -347,3 +348,22 @@ fn test_calculate_percentage_change_returns_none_for_zero_baseline() {
     assert_eq!(calculate_percentage_change_bps(0, 1_000_000), None);
     assert_eq!(calculate_percentage_difference_bps(0, 1_000_000), None);
 }
+
+#[test]
+fn test_is_stale_with_mocked_ledger_time() {
+    // Test case: ledger_time=2000, stored_timestamp=1000, ttl=500
+    // Expected: 2000 >= (1000 + 500) = 2000 >= 1500 = true (stale)
+    let current_time = 2000u64;
+    let stored_timestamp = 1000u64;
+    let ttl = 500u64;
+    
+    assert!(is_stale(current_time, stored_timestamp, ttl), "Price should be stale");
+    
+    // Additional test: not stale case
+    // current_time < stored_timestamp + ttl should return false
+    assert!(!is_stale(1400u64, 1000u64, 500u64), "Price should not be stale when within TTL");
+    
+    // Edge case: exactly at expiration boundary
+    assert!(is_stale(1500u64, 1000u64, 500u64), "Price should be stale at expiration boundary");
+}
+

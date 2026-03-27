@@ -22,6 +22,8 @@ pub struct PriceData {
     pub decimals: u32,
     /// Confidence score (0-100, higher is more confident)
     pub confidence_score: u32,
+    /// Time-to-live in seconds for this price (per-asset expiration)
+    pub ttl: u64,
 }
 
 /// A simplified price entry for external consumers.

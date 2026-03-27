@@ -69,6 +69,22 @@ fn is_valid(price: i128) -> bool {
     price > 0
 }
 
+/// Check if a price entry is stale based on its TTL.
+///
+/// A price is considered stale if the current ledger timestamp has passed
+/// the expiration time (stored_timestamp + ttl).
+///
+/// # Arguments
+/// * `current_time` - The current ledger timestamp
+/// * `stored_timestamp` - The timestamp when the price was stored
+/// * `ttl` - The time-to-live in seconds
+///
+/// # Returns
+/// `true` if the price is stale (expired), `false` otherwise
+fn is_stale(current_time: u64, stored_timestamp: u64, ttl: u64) -> bool {
+    current_time >= stored_timestamp.saturating_add(ttl)
+}
+
 #[contractimpl]
 impl PriceOracle {
     /// Initialize the contract with admin and base currency pairs.
@@ -93,10 +109,9 @@ impl PriceOracle {
 
         match prices.get(asset) {
             Some(price_data) => {
-                // Staleness check: 1 hour (3600 seconds)
+                // Check if price is stale using per-asset TTL
                 let now = env.ledger().timestamp();
-                let max_age = 3600u64;
-                if now > price_data.timestamp && now - price_data.timestamp > max_age {
+                if is_stale(now, price_data.timestamp, price_data.ttl) {
                     return Err(Error::AssetNotFound); // Could define a new error for StalePrice
                 }
                 Ok(price_data)
@@ -134,7 +149,14 @@ impl PriceOracle {
     }
 
     /// Set the price data for a specific asset.
-    pub fn set_price(env: Env, asset: Symbol, val: i128, decimals: u32) {
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `asset` - The asset symbol to set
+    /// * `val` - The price value
+    /// * `decimals` - Number of decimals for the price
+    /// * `ttl` - Time-to-live in seconds for this price (per-asset expiration)
+    pub fn set_price(env: Env, asset: Symbol, val: i128, decimals: u32, ttl: u64) {
         let storage = env.storage().persistent();
         let mut prices: soroban_sdk::Map<Symbol, PriceData> = storage
             .get(&DataKey::PriceData)
@@ -147,6 +169,7 @@ impl PriceOracle {
             provider: env.current_contract_address(),
             decimals,
             confidence_score: 100,
+            ttl,
         };
 
         prices.set(asset, price_data);
@@ -160,6 +183,9 @@ impl PriceOracle {
     /// * `source` - The address of the authorized backend relayer
     /// * `asset` - The asset symbol to update
     /// * `price` - The new price (as i128)
+    /// * `decimals` - Number of decimals for the price
+    /// * `confidence_score` - Confidence score for this price update
+    /// * `ttl` - Time-to-live in seconds for this price (per-asset expiration)
     ///
     /// # Errors
     /// * `Error::InvalidAssetSymbol` - If `asset` is not NGN, KES, or GHS
@@ -173,6 +199,7 @@ impl PriceOracle {
         price: i128,
         decimals: u32,
         confidence_score: u32,
+        ttl: u64,
     ) -> Result<(), Error> {
         source.require_auth();
 
@@ -205,6 +232,7 @@ impl PriceOracle {
             provider: source.clone(),
             decimals,
             confidence_score,
+            ttl,
         };
 
         prices.set(asset.clone(), price_data);

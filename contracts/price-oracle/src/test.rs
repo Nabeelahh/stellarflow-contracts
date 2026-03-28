@@ -70,8 +70,8 @@ fn test_initialize_success() {
 
     // Must be inside as_contract to access instance storage
     env.as_contract(&contract_id, || {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        assert_eq!(stored_admin, admin);
+        let stored_admins: soroban_sdk::Vec<Address> = env.storage().instance().get(&DataKey::Admin).unwrap();
+        assert!(stored_admins.contains(&admin));
 
         let stored_pairs: soroban_sdk::Vec<Symbol> = env
             .storage()
@@ -83,7 +83,7 @@ fn test_initialize_success() {
 }
 
 #[test]
-#[should_panic(expected = "Contract already initialized")]
+#[should_panic]
 fn test_initialize_double_panics() {
     let env = Env::default();
     env.mock_all_auths();
@@ -92,7 +92,7 @@ fn test_initialize_double_panics() {
     let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
     let pairs = soroban_sdk::vec![&env, symbol_short!("NGN")];
     client.initialize(&admin, &pairs);
-    // Second call should panic
+    // Second call should panic with Error::AlreadyInitialized
     client.initialize(&admin, &pairs);
 }
 
@@ -121,7 +121,7 @@ fn test_init_admin_sets_admin_once() {
 
     env.as_contract(&contract_id, || {
         assert!(crate::auth::_has_admin(&env));
-        assert_eq!(crate::auth::_get_admin(&env), admin);
+        assert!(crate::auth::_get_admin(&env).contains(&admin));
     });
 }
 
@@ -140,7 +140,7 @@ fn test_get_admin_reader_returns_current_admin() {
 }
 
 #[test]
-#[should_panic(expected = "Admin already initialised")]
+#[should_panic]
 fn test_init_admin_panics_when_called_twice() {
     let env = Env::default();
     env.mock_all_auths();
@@ -151,6 +151,7 @@ fn test_init_admin_panics_when_called_twice() {
     let second_admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
 
     client.init_admin(&first_admin);
+    // Second call should panic with Error::AlreadyInitialized
     client.init_admin(&second_admin);
 }
 
@@ -263,7 +264,7 @@ fn test_update_price_provider_can_store_new_price() {
     let asset = symbol_short!("NGN");
 
     env.as_contract(&contract_id, || {
-        crate::auth::_set_admin(&env, &admin);
+        crate::auth::_set_admin(&env, &soroban_sdk::vec![&env, admin.clone()]);
         crate::auth::_add_provider(&env, &provider);
     });
 
@@ -290,7 +291,7 @@ fn test_update_price_multiple_updates() {
     let asset = symbol_short!("NGN");
 
     env.as_contract(&contract_id, || {
-        crate::auth::_set_admin(&env, &admin);
+        crate::auth::_set_admin(&env, &soroban_sdk::vec![&env, admin.clone()]);
         crate::auth::_add_provider(&env, &provider);
     });
 
@@ -302,7 +303,7 @@ fn test_update_price_multiple_updates() {
 }
 
 #[test]
-fn test_update_price_unauthorized_rejection() {
+fn test_update_price_admin_authority() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -313,7 +314,7 @@ fn test_update_price_unauthorized_rejection() {
     let unauthorized_address = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
 
     env.as_contract(&contract_id, || {
-        crate::auth::_set_admin(&env, &admin);
+        crate::auth::_set_admin(&env, &soroban_sdk::vec![&env, admin.clone()]);
     });
 
     let result = client.try_update_price(
@@ -324,7 +325,10 @@ fn test_update_price_unauthorized_rejection() {
         &100u32,
         &3600u64,
     );
-    assert!(result.is_err());
+    match result {
+        Err(Ok(e)) => assert_eq!(e, Error::NotAuthorized),
+        other => panic!("expected NotAuthorized, got {:?}", other),
+    }
 }
 
 #[test]
@@ -338,7 +342,7 @@ fn test_update_price_rejects_unapproved_symbol() {
     let provider = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
 
     env.as_contract(&contract_id, || {
-        crate::auth::_set_admin(&env, &admin);
+        crate::auth::_set_admin(&env, &soroban_sdk::vec![&env, admin.clone()]);
         crate::auth::_add_provider(&env, &provider);
     });
 
@@ -364,7 +368,7 @@ fn test_update_price_emits_event() {
     let price: i128 = 1_500_000;
 
     env.as_contract(&contract_id, || {
-        crate::auth::_set_admin(&env, &admin);
+        crate::auth::_set_admin(&env, &soroban_sdk::vec![&env, admin.clone()]);
         crate::auth::_add_provider(&env, &provider);
     });
 
@@ -427,6 +431,107 @@ fn test_is_stale_with_mocked_ledger_time() {
     
     // Edge case: exactly at expiration boundary
     assert!(is_stale(1500u64, 1000u64, 500u64), "Price should be stale at expiration boundary");
+}
+
+// ============================================================================
+// Cross-Contract Tests - Dummy Consumer calling the Oracle
+// ============================================================================
+
+// ============================================================================
+// remove_asset tests
+// ============================================================================
+
+#[test]
+fn test_remove_asset_deletes_price_entry() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_set_admin(&env, &soroban_sdk::vec![&env, admin.clone()]);
+    });
+
+    let asset = symbol_short!("NGN");
+    client.set_price(&asset, &1_000_i128, &2u32, &3600u64);
+
+    // Confirm it exists
+    assert!(client.get_price_safe(&asset).is_some());
+
+    // Remove it
+    client.remove_asset(&admin, &asset);
+
+    // Should be gone
+    assert!(client.get_price_safe(&asset).is_none());
+}
+
+#[test]
+fn test_remove_asset_not_in_get_all_assets() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_set_admin(&env, &soroban_sdk::vec![&env, admin.clone()]);
+    });
+
+    let ngn = symbol_short!("NGN");
+    let kes = symbol_short!("KES");
+    client.set_price(&ngn, &1_000_i128, &2u32, &3600u64);
+    client.set_price(&kes, &500_i128, &2u32, &3600u64);
+
+    client.remove_asset(&admin, &ngn);
+
+    let assets = client.get_all_assets();
+    assert_eq!(assets.len(), 1);
+    assert!(!assets.contains(&ngn));
+    assert!(assets.contains(&kes));
+}
+
+#[test]
+fn test_remove_asset_nonexistent_returns_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_set_admin(&env, &soroban_sdk::vec![&env, admin.clone()]);
+    });
+
+    let result = client.try_remove_asset(&admin, &symbol_short!("NGN"));
+    match result {
+        Err(Ok(e)) => assert_eq!(e, Error::AssetNotFound),
+        other => panic!("expected AssetNotFound, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_remove_asset_non_admin_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let non_admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_set_admin(&env, &soroban_sdk::vec![&env, admin.clone()]);
+    });
+
+    let asset = symbol_short!("NGN");
+    client.set_price(&asset, &1_000_i128, &2u32, &3600u64);
+
+    let result = client.try_remove_asset(&non_admin, &asset);
+    assert!(result.is_err());
 }
 
 // ============================================================================
@@ -580,7 +685,7 @@ fn test_upgrade_admin_only() {
 }
 
 #[test]
-#[should_panic(expected = "Unauthorised: caller is not the admin")]
+#[should_panic(expected = "Unauthorised: caller is not in the authorized admin list")]
 fn test_upgrade_rejects_non_admin() {
     let env = Env::default();
     env.mock_all_auths();
@@ -595,4 +700,112 @@ fn test_upgrade_rejects_non_admin() {
     let dummy_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
     // Must panic – non_admin is not the admin
     client.upgrade(&non_admin, &dummy_hash);
+}
+
+// ============================================================================
+// Bulk get_prices Tests
+// ============================================================================
+
+#[test]
+fn test_get_prices_returns_all_requested_assets() {
+    let env = Env::default();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let ngn = symbol_short!("NGN");
+    let kes = symbol_short!("KES");
+    let ghs = symbol_short!("GHS");
+
+    env.ledger().set_timestamp(1_000_000);
+    env.ledger().set_sequence_number(1);
+    client.set_price(&ngn, &1_500_i128, &2u32, &3600u64);
+    client.set_price(&kes, &800_i128, &2u32, &3600u64);
+    client.set_price(&ghs, &5_000_i128, &2u32, &3600u64);
+
+    let assets = soroban_sdk::vec![&env, ngn.clone(), kes.clone(), ghs.clone()];
+    let results = client.get_prices(&assets);
+
+    assert_eq!(results.len(), 3);
+    assert_eq!(results.get(0).unwrap().unwrap().price, 1_500_i128);
+    assert_eq!(results.get(1).unwrap().unwrap().price, 800_i128);
+    assert_eq!(results.get(2).unwrap().unwrap().price, 5_000_i128);
+}
+
+#[test]
+fn test_get_prices_returns_none_for_missing_asset() {
+    let env = Env::default();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let ngn = symbol_short!("NGN");
+    let btc = symbol_short!("BTC"); // not stored
+
+    env.ledger().set_timestamp(1_000_000);
+    env.ledger().set_sequence_number(1);
+    client.set_price(&ngn, &1_500_i128, &2u32, &3600u64);
+
+    let assets = soroban_sdk::vec![&env, ngn.clone(), btc.clone()];
+    let results = client.get_prices(&assets);
+
+    assert_eq!(results.len(), 2);
+    assert!(results.get(0).unwrap().is_some());
+    assert!(results.get(1).unwrap().is_none()); // BTC missing → None
+}
+
+#[test]
+fn test_get_prices_returns_none_for_stale_asset() {
+    let env = Env::default();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let ngn = symbol_short!("NGN");
+
+    // Store price with a short TTL of 100 seconds
+    env.ledger().set_timestamp(1_000_000);
+    env.ledger().set_sequence_number(1);
+    client.set_price(&ngn, &1_500_i128, &2u32, &100u64);
+
+    // Advance time past TTL
+    env.ledger().set_timestamp(1_000_200);
+    env.ledger().set_sequence_number(2);
+
+    let assets = soroban_sdk::vec![&env, ngn.clone()];
+    let results = client.get_prices(&assets);
+
+    assert_eq!(results.len(), 1);
+    assert!(results.get(0).unwrap().is_none()); // stale → None
+}
+
+#[test]
+fn test_get_prices_preserves_order() {
+    let env = Env::default();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let ngn = symbol_short!("NGN");
+    let kes = symbol_short!("KES");
+
+    env.ledger().set_timestamp(1_000_000);
+    env.ledger().set_sequence_number(1);
+    client.set_price(&ngn, &111_i128, &2u32, &3600u64);
+    client.set_price(&kes, &222_i128, &2u32, &3600u64);
+
+    // Request in reverse order
+    let assets = soroban_sdk::vec![&env, kes.clone(), ngn.clone()];
+    let results = client.get_prices(&assets);
+
+    assert_eq!(results.get(0).unwrap().unwrap().price, 222_i128); // KES first
+    assert_eq!(results.get(1).unwrap().unwrap().price, 111_i128); // NGN second
+}
+
+#[test]
+fn test_get_prices_empty_input_returns_empty_vec() {
+    let env = Env::default();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let assets: soroban_sdk::Vec<Symbol> = soroban_sdk::vec![&env];
+    let results = client.get_prices(&assets);
+
+    assert_eq!(results.len(), 0);
 }

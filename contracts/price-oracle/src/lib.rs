@@ -382,8 +382,15 @@ impl PriceOracle {
             ttl,
         };
 
-        prices.set(asset, price_data);
+        prices.set(asset.clone(), price_data);
         storage.set(&DataKey::PriceData, &prices);
+
+        // Emit AssetAdded event only when a new asset is added (not on updates)
+        if is_new_asset {
+            env.events().publish_event(&AssetAddedEvent {
+                symbol: asset,
+            });
+        }
     }
 
     /// Upgrade the contract WASM code.

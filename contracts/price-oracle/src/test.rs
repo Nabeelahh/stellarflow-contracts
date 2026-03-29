@@ -1055,3 +1055,138 @@ fn test_set_price_bounds_non_admin_rejected() {
     // non_admin should be rejected
     client.set_price_bounds(&non_admin, &symbol_short!("NGN"), &500_i128, &2_000_i128);
 }
+
+// ============================================================================
+// AssetAdded Event Tests
+// ============================================================================
+
+#[test]
+fn test_set_price_emits_asset_added_event_on_first_add() {
+    let env = Env::default();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let asset = symbol_short!("NGN");
+
+    // Set price for a new asset
+    client.set_price(&asset, &1_500_i128, &2u32, &3600u64);
+
+    // Verify AssetAdded event was emitted
+    let events = env.events().all();
+    let debug_str = alloc::format!("{:?}", events);
+    assert!(debug_str.contains("asset_added_event"), "AssetAdded event should be emitted for new asset");
+    assert!(debug_str.contains("symbol"), "Event should contain symbol field");
+    assert!(debug_str.contains("NGN"), "Event should contain the correct asset symbol");
+}
+
+#[test]
+fn test_set_price_does_not_emit_asset_added_event_on_update() {
+    let env = Env::default();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let asset = symbol_short!("NGN");
+
+    // First set - should emit AssetAdded
+    client.set_price(&asset, &1_500_i128, &2u32, &3600u64);
+
+    // Verify first event was emitted
+    let events_after_first = env.events().all();
+    let debug_str_first = alloc::format!("{:?}", events_after_first);
+    assert!(debug_str_first.contains("asset_added_event"), "Should emit AssetAdded on first set");
+
+    // Second set (update) - should NOT emit AssetAdded
+    env.ledger().set_timestamp(1_234_567_900);
+    client.set_price(&asset, &1_600_i128, &2u32, &3600u64);
+
+    // Verify no AssetAdded event on update (only the update event should be present if any)
+    let events_after_second = env.events().all();
+    let debug_str_second = alloc::format!("{:?}", events_after_second);
+    // Should NOT contain asset_added_event on update
+    assert!(!debug_str_second.contains("asset_added_event"), "Should NOT emit AssetAdded on update");
+}
+
+#[test]
+fn test_multiple_assets_added_sequentially_each_emits_event() {
+    let env = Env::default();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let ngn = symbol_short!("NGN");
+    let kes = symbol_short!("KES");
+    let ghs = symbol_short!("GHS");
+
+    // Add NGN - should emit AssetAdded
+    client.set_price(&ngn, &1_500_i128, &2u32, &3600u64);
+    let events_ngn = env.events().all();
+    let debug_ngn = alloc::format!("{:?}", events_ngn);
+    assert!(debug_ngn.contains("asset_added_event"), "Should emit AssetAdded for NGN");
+    assert!(debug_ngn.contains("NGN"), "Should contain NGN symbol");
+
+    // Add KES - should emit AssetAdded
+    client.set_price(&kes, &800_i128, &2u32, &3600u64);
+    let events_kes = env.events().all();
+    let debug_kes = alloc::format!("{:?}", events_kes);
+    assert!(debug_kes.contains("asset_added_event"), "Should emit AssetAdded for KES");
+    assert!(debug_kes.contains("KES"), "Should contain KES symbol");
+
+    // Add GHS - should emit AssetAdded
+    client.set_price(&ghs, &5_000_i128, &2u32, &3600u64);
+    let events_ghs = env.events().all();
+    let debug_ghs = alloc::format!("{:?}", events_ghs);
+    assert!(debug_ghs.contains("asset_added_event"), "Should emit AssetAdded for GHS");
+    assert!(debug_ghs.contains("GHS"), "Should contain GHS symbol");
+}
+
+#[test]
+fn test_mixed_add_and_update_emits_correct_events() {
+    let env = Env::default();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let ngn = symbol_short!("NGN");
+    let kes = symbol_short!("KES");
+
+    // Add NGN (new asset) - should emit AssetAdded
+    client.set_price(&ngn, &1_500_i128, &2u32, &3600u64);
+    let events_ngn = env.events().all();
+    let debug_ngn = alloc::format!("{:?}", events_ngn);
+    assert!(debug_ngn.contains("asset_added_event"), "Should emit AssetAdded for NGN");
+
+    // Add KES (new asset) - should emit AssetAdded
+    client.set_price(&kes, &800_i128, &2u32, &3600u64);
+    let events_kes = env.events().all();
+    let debug_kes = alloc::format!("{:?}", events_kes);
+    assert!(debug_kes.contains("asset_added_event"), "Should emit AssetAdded for KES");
+
+    // Update NGN (existing asset) - should NOT emit AssetAdded
+    env.ledger().set_timestamp(1_234_567_900);
+    client.set_price(&ngn, &1_600_i128, &2u32, &3600u64);
+    let events_update = env.events().all();
+    let debug_update = alloc::format!("{:?}", events_update);
+    assert!(!debug_update.contains("asset_added_event"), "Should NOT emit AssetAdded on update");
+
+    // Add GHS (new asset) - should emit AssetAdded
+    let ghs = symbol_short!("GHS");
+    client.set_price(&ghs, &5_000_i128, &2u32, &3600u64);
+    let events_ghs = env.events().all();
+    let debug_ghs = alloc::format!("{:?}", events_ghs);
+    assert!(debug_ghs.contains("asset_added_event"), "Should emit AssetAdded for GHS");
+}
+
+#[test]
+fn test_asset_added_event_contains_correct_symbol() {
+    let env = Env::default();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let asset = symbol_short!("NGN");
+
+    client.set_price(&asset, &1_500_i128, &2u32, &3600u64);
+
+    // Verify event structure contains the correct symbol
+    let events = env.events().all();
+    let debug_str = alloc::format!("{:?}", events);
+    assert!(debug_str.contains("asset_added_event"), "Should emit AssetAdded event");
+    assert!(debug_str.contains("NGN"), "Event should contain the correct asset symbol");
+}

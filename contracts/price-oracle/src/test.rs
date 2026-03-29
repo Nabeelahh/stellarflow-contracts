@@ -3,7 +3,7 @@ extern crate alloc;
 
 use super::*;
 use soroban_sdk::{
-    contract, contractimpl, symbol_short, testutils::Events,
+    contract, contractimpl, symbol_short, testutils::Address as _, testutils::Events,
     testutils::Ledger, Address, Env, Symbol,
 };
 

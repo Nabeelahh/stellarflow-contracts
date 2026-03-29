@@ -90,6 +90,8 @@ pub enum Error {
     PriceDeltaExceeded = 7,
     /// Price is outside the configured min/max bounds for the asset.
     PriceOutOfBounds = 8,
+    /// Provider weight must be between 0 and 100.
+    InvalidWeight = 9,
 }
 
 #[contract]

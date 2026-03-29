@@ -3,7 +3,7 @@ extern crate alloc;
 
 use super::*;
 use soroban_sdk::{
-    contract, contractimpl, symbol_short, testutils::Events,
+    contract, contractimpl, symbol_short, testutils::Address as _, testutils::Events,
     testutils::Ledger, Address, Env, Symbol,
 };
 
@@ -1020,4 +1020,85 @@ fn test_set_price_bounds_non_admin_rejected() {
 
     // non_admin should be rejected
     client.set_price_bounds(&non_admin, &symbol_short!("NGN"), &500_i128, &2_000_i128);
+}
+
+// ============================================================================
+// Weighted Average Tests
+// ============================================================================
+
+#[test]
+fn test_set_provider_weight_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.init_admin(&admin);
+
+    let provider = Address::generate(&env);
+    env.as_contract(&contract_id, || {
+        crate::auth::_add_provider(&env, &provider);
+    });
+
+    client.set_provider_weight(&admin, &provider, &75);
+    assert_eq!(client.get_provider_weight(&provider), 75);
+}
+
+#[test]
+fn test_set_provider_weight_not_authorized_for_non_provider() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.init_admin(&admin);
+
+    let random = Address::generate(&env);
+    
+    // Random address is not a whitelisted provider
+    let result = client.try_set_provider_weight(&admin, &random, &50);
+    match result {
+        Err(Ok(e)) => assert_eq!(e, Error::NotAuthorized),
+        other => panic!("expected NotAuthorized, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_set_provider_weight_invalid_weight() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.init_admin(&admin);
+
+    let provider = Address::generate(&env);
+    env.as_contract(&contract_id, || {
+        crate::auth::_add_provider(&env, &provider);
+    });
+
+    let result = client.try_set_provider_weight(&admin, &provider, &101);
+    match result {
+        Err(Ok(e)) => assert_eq!(e, Error::InvalidWeight),
+        other => panic!("expected InvalidWeight, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_set_provider_weight_admin_only() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.init_admin(&admin);
+
+    let provider = Address::generate(&env);
+    let non_admin = Address::generate(&env);
+    env.as_contract(&contract_id, || {
+        crate::auth::_add_provider(&env, &provider);
+    });
+
+    let result = client.try_set_provider_weight(&non_admin, &provider, &50);
+    assert!(result.is_err());
 }

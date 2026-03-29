@@ -44,6 +44,11 @@ pub trait StellarFlowTrait {
     ///
     /// Returns the address of the contract administrator.
     fn get_admin(env: Env) -> Address;
+
+    /// Get the weight (0-100) assigned to a specific provider.
+    ///
+    /// Weights are used to prioritize data from specific providers in calculations.
+    fn get_provider_weight(env: Env, provider: Address) -> u32;
 }
 
 /// Error types for the price oracle contract
@@ -67,6 +72,8 @@ pub enum Error {
     PriceDeltaExceeded = 7,
     /// Price is outside the configured min/max bounds for the asset.
     PriceOutOfBounds = 8,
+    /// Provider weight must be between 0 and 100.
+    InvalidWeight = 9,
 }
 
 #[contract]
@@ -454,6 +461,40 @@ impl PriceOracle {
             .get(&DataKey::PriceBoundsData)
             .unwrap_or_else(|| soroban_sdk::Map::new(&env));
         bounds_map.get(asset)
+    }
+
+    /// Set the weight (0-100) for a specific provider.
+    ///
+    /// Weights allow the oracle to prioritize certain data sources. Restricted to admin.
+    ///
+    /// # Arguments
+    /// * `admin`    - The current admin address (must sign)
+    /// * `provider` - The provider address to weight
+    /// * `weight`   - The weight value (0 to 100)
+    pub fn set_provider_weight(
+        env: Env,
+        admin: Address,
+        provider: Address,
+        weight: u32,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        crate::auth::_require_authorized(&env, &admin);
+
+        if weight > 100 {
+            return Err(Error::InvalidWeight);
+        }
+
+        if !crate::auth::_is_provider(&env, &provider) {
+            return Err(Error::NotAuthorized);
+        }
+
+        crate::auth::_set_provider_weight(&env, &provider, weight);
+        Ok(())
+    }
+
+    /// Get the weight assigned to a specific provider.
+    pub fn get_provider_weight(env: Env, provider: Address) -> u32 {
+        crate::auth::_get_provider_weight(&env, &provider)
     }
 }
 

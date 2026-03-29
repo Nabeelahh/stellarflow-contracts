@@ -7,7 +7,8 @@ pub enum DataKey {
     BaseCurrencyPairs,
     PriceData,
     PriceBoundsData,
-    Initialized,
+    PendingAdmin,
+    PendingAdminTimestamp,
 }
 
 /// Canonical storage format for a price entry.

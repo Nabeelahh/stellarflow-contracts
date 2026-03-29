@@ -264,6 +264,25 @@ impl PriceOracle {
         env.storage().instance().set(&DataKey::Initialized, &true);
     }
 
+    /// Whitelist a backend relayer address so it can push price data.
+    ///
+    /// Only the admin can call this. Idempotent — calling with an already-whitelisted
+    /// address is a no-op.
+    pub fn add_provider(env: Env, admin: Address, provider: Address) {
+        admin.require_auth();
+        crate::auth::_require_authorized(&env, &admin);
+        crate::auth::_add_provider(&env, &provider);
+    }
+
+    /// Remove a provider from the whitelist, revoking their ability to push prices.
+    ///
+    /// Only the admin can call this. Safe to call with a non-existent provider.
+    pub fn remove_provider(env: Env, admin: Address, provider: Address) {
+        admin.require_auth();
+        crate::auth::_require_authorized(&env, &admin);
+        crate::auth::_remove_provider(&env, &provider);
+    }
+
     /// Return the current admin addresses.
     pub fn get_admin(env: Env) -> Address {
         crate::auth::_get_admin(&env)

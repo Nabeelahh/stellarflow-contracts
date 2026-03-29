@@ -121,6 +121,11 @@ pub fn is_stale(current_time: u64, stored_timestamp: u64, ttl: u64) -> bool {
 
 #[contractimpl]
 impl PriceOracle {
+    /// Returns `true` if the given address is a whitelisted provider.
+    fn is_whitelisted_provider(env: &Env, addr: &Address) -> bool {
+        crate::auth::_is_provider(env, addr)
+    }
+
     /// Initialize the contract with admin and base currency pairs.
     /// Can only be called once.
     pub fn initialize(env: Env, admin: Address, base_currency_pairs: soroban_sdk::Vec<Symbol>) {
@@ -351,7 +356,7 @@ impl PriceOracle {
             return Err(Error::InvalidPrice);
         }
 
-        if !crate::auth::_is_provider(&env, &source) {
+        if !Self::is_whitelisted_provider(&env, &source) {
             return Err(Error::NotAuthorized);
         }
 

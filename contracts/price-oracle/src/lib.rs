@@ -378,6 +378,14 @@ impl PriceOracle {
             .remove(&DataKey::PendingAdminTimestamp);
     }
 
+    /// A low-gas health check to verify the contract is responding.
+    ///
+    /// Returns a simple "PONG" symbol with minimal gas consumption.
+    /// Useful for monitoring and liveness checks without state access.
+    pub fn ping(_env: Env) -> Symbol {
+        soroban_sdk::symbol_short!("PONG")
+    }
+
     /// Get the price data for a specific asset.
     /// Returns error if price is stale.
     pub fn get_price(env: Env, asset: Symbol) -> Result<PriceData, Error> {

@@ -6,6 +6,10 @@ use crate::types::{DataKey, PriceData};
 
 const PRICE_DATA_KEY: Symbol = symbol_short!("prices");
 
+/// Maximum allowed percentage change between price updates (10% = 1000 basis points).
+/// Any price update exceeding this threshold will be rejected to prevent flash crashes.
+const MAX_PERCENT_CHANGE_BPS: i128 = 1_000;
+
 /// Error types for the price oracle contract
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -19,6 +23,8 @@ pub enum Error {
     InvalidAssetSymbol = 3,
     /// Price must be greater than zero.
     InvalidPrice = 4,
+    /// Price change exceeds maximum allowed threshold (flash crash protection).
+    FlashCrashDetected = 5,
 }
 
 /// Event emitted when a price is updated
@@ -197,6 +203,15 @@ impl PriceOracle {
             .get(asset.clone())
             .map(|existing_price| existing_price.price)
             .unwrap_or(0);
+
+        // Flash crash protection: reject if price change exceeds MAX_PERCENT_CHANGE
+        if old_price > 0 {
+            if let Some(pct_change_bps) = calculate_percentage_difference_bps(old_price, price) {
+                if pct_change_bps > MAX_PERCENT_CHANGE_BPS {
+                    return Err(Error::FlashCrashDetected);
+                }
+            }
+        }
 
         let timestamp = env.ledger().timestamp();
         let price_data = PriceData {

@@ -3,12 +3,13 @@ extern crate alloc;
 
 use super::*;
 use soroban_sdk::{
-    contract, contractimpl, symbol_short, testutils::Events,
+    contract, contractimpl, symbol_short, testutils::Address as _, testutils::Events,
     testutils::Ledger, Address, Env, Symbol,
 };
 
 use crate::{
-    calculate_percentage_change_bps, calculate_percentage_difference_bps, is_stale,
+    calculate_percentage_change_bps, calculate_percentage_difference_bps,
+    calculate_price_volatility, is_stale,
     StellarFlowClient, Error,
 };
 
@@ -54,6 +55,24 @@ impl DummyConsumer {
     }
 }
 
+#[soroban_sdk::contractevent]
+pub struct TokenTransferEvent {
+    pub from: Address,
+    pub to: Address,
+    pub amount: i128,
+}
+
+#[contract]
+pub struct DummyToken;
+
+#[contractimpl]
+impl DummyToken {
+    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        from.require_auth();
+        env.events().publish_event(&TokenTransferEvent { from, to, amount });
+    }
+}
+
 #[test]
 fn test_initialize_success() {
     let env = Env::default();
@@ -80,6 +99,16 @@ fn test_initialize_success() {
             .unwrap();
         assert_eq!(stored_pairs, pairs);
     });
+}
+
+#[test]
+fn test_get_ledger_version_returns_sequence() {
+    let env = Env::default();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    env.ledger().set_sequence_number(42);
+    assert_eq!(client.get_ledger_version(), 42);
 }
 
 #[test]
@@ -137,6 +166,22 @@ fn test_get_admin_reader_returns_current_admin() {
     client.init_admin(&admin);
 
     assert_eq!(client.get_admin(), admin);
+}
+
+#[test]
+fn test_is_admin_returns_true_for_current_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let non_admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    client.init_admin(&admin);
+
+    assert!(client.is_admin(&admin));
+    assert!(!client.is_admin(&non_admin));
 }
 
 #[test]
@@ -274,6 +319,49 @@ fn test_get_all_assets_returns_tracked_symbols() {
 }
 
 #[test]
+fn test_add_asset_initializes_zero_price_and_tracks_symbol() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_set_admin(&env, &soroban_sdk::vec![&env, admin.clone()]);
+    });
+
+    let asset = symbol_short!("ZAR");
+    client.add_asset(&admin, &asset).unwrap();
+
+    let assets = client.get_all_assets();
+    assert!(assets.contains(&asset));
+
+    let stored = client.get_price_safe(&asset).unwrap();
+    assert_eq!(stored.price, 0);
+    assert_eq!(stored.decimals, 0);
+    assert_eq!(stored.confidence_score, 0);
+    assert_eq!(stored.ttl, 0);
+}
+
+#[test]
+#[should_panic]
+fn test_add_asset_non_admin_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let non_admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_set_admin(&env, &soroban_sdk::vec![&env, admin.clone()]);
+    });
+
+    let asset = symbol_short!("ZAR");
+    client.add_asset(&non_admin, &asset).unwrap();
+}
+
+#[test]
 fn test_set_price_uses_current_ledger_timestamp() {
     let env = Env::default();
     let contract_id = env.register(PriceOracle, ());
@@ -287,6 +375,30 @@ fn test_set_price_uses_current_ledger_timestamp() {
     let stored = client.get_price(&asset);
     assert_eq!(stored.price, 950_i128);
     assert_eq!(stored.timestamp, 1_700_000_123);
+}
+
+#[test]
+#[should_panic(expected = "Error(InvalidPrice)")]
+fn test_set_price_rejects_zero_price() {
+    let env = Env::default();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let asset = symbol_short!("NGN");
+
+    // Zero price should be rejected to prevent negative price exploits
+    client.set_price(&asset, &0_i128, &2u32, &3600u64);
+}
+
+#[test]
+#[should_panic(expected = "Error(InvalidPrice)")]
+fn test_set_price_rejects_negative_price() {
+    let env = Env::default();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let asset = symbol_short!("NGN");
+
+    // Negative price should be rejected to prevent mathematical overflows in downstream DeFi protocols
+    client.set_price(&asset, &-1_i128, &2u32, &3600u64);
 }
 
 #[test]
@@ -370,6 +482,52 @@ fn test_update_price_admin_authority() {
 }
 
 #[test]
+fn test_rescue_tokens_admin_can_recover_assets() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let token_id = env.register(DummyToken, ());
+
+    let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let recipient = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_set_admin(&env, &soroban_sdk::vec![&env, admin.clone()]);
+    });
+
+    client.rescue_tokens(&admin, &token_id, &recipient, &1_000_i128);
+
+    let events = env.events().all();
+    let debug_str = alloc::format!("{:?}", events);
+    assert!(debug_str.contains("TokenTransferEvent"));
+    assert!(debug_str.contains(&format!("{:?}", recipient)));
+    assert!(debug_str.contains(&format!("{:?}", 1_000_i128)));
+}
+
+#[test]
+#[should_panic(expected = "Unauthorised: caller is not in the authorized admin list")]
+fn test_rescue_tokens_rejects_non_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let token_id = env.register(DummyToken, ());
+
+    let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let non_admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let recipient = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_set_admin(&env, &soroban_sdk::vec![&env, admin.clone()]);
+    });
+
+    client.rescue_tokens(&non_admin, &token_id, &recipient, &1_000_i128);
+}
+
+#[test]
 fn test_update_price_rejects_unapproved_symbol() {
     let env = Env::default();
     env.mock_all_auths();
@@ -420,6 +578,40 @@ fn test_update_price_emits_event() {
 }
 
 #[test]
+fn test_update_price_delta_limit_rejection_emits_anomaly_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let provider = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let asset = symbol_short!("NGN");
+
+    env.as_contract(&contract_id, || {
+        crate::auth::_set_admin(&env, &soroban_sdk::vec![&env, admin.clone()]);
+        crate::auth::_add_provider(&env, &provider);
+    });
+
+    env.ledger().set_timestamp(1_700_100_000);
+    env.ledger().set_sequence_number(1);
+    client.update_price(&provider, &asset, &1_000_i128, &6u32, &100u32, &3600u64);
+
+    env.ledger().set_timestamp(1_700_100_010);
+    env.ledger().set_sequence_number(2);
+    let result = client.try_update_price(&provider, &asset, &1_100_i128, &6u32, &100u32, &3600u64);
+    assert!(result.is_ok());
+
+    let events = env.events().all();
+    let debug_str = alloc::format!("{:?}", events);
+    assert!(debug_str.contains("price_anomaly_event"));
+
+    let stored = client.get_price(&asset);
+    assert_eq!(stored.price, 1_000_i128);
+}
+
+#[test]
 fn test_calculate_percentage_change_bps_for_increase() {
     assert_eq!(
         calculate_percentage_change_bps(1_000_000, 1_200_000),
@@ -451,6 +643,50 @@ fn test_calculate_percentage_difference_bps_is_absolute() {
 fn test_calculate_percentage_change_returns_none_for_zero_baseline() {
     assert_eq!(calculate_percentage_change_bps(0, 1_000_000), None);
     assert_eq!(calculate_percentage_difference_bps(0, 1_000_000), None);
+}
+
+// ============================================================================
+// calculate_price_volatility tests (Circuit Breaker helper)
+// ============================================================================
+
+#[test]
+fn test_price_volatility_increase() {
+    assert_eq!(
+        calculate_price_volatility(1_000_000, 1_200_000),
+        Some(200_000)
+    );
+}
+
+#[test]
+fn test_price_volatility_decrease() {
+    assert_eq!(
+        calculate_price_volatility(1_200_000, 1_000_000),
+        Some(200_000)
+    );
+}
+
+#[test]
+fn test_price_volatility_no_change() {
+    assert_eq!(
+        calculate_price_volatility(500_000, 500_000),
+        Some(0)
+    );
+}
+
+#[test]
+fn test_price_volatility_from_zero() {
+    assert_eq!(
+        calculate_price_volatility(0, 1_000_000),
+        Some(1_000_000)
+    );
+}
+
+#[test]
+fn test_price_volatility_to_zero() {
+    assert_eq!(
+        calculate_price_volatility(1_000_000, 0),
+        Some(1_000_000)
+    );
 }
 
 #[test]
@@ -757,16 +993,19 @@ fn test_get_prices_returns_all_requested_assets() {
     env.ledger().set_timestamp(1_000_000);
     env.ledger().set_sequence_number(1);
     client.set_price(&ngn, &1_500_i128, &2u32, &3600u64);
-    client.set_price(&kes, &800_i128, &2u32, &3600u64);
-    client.set_price(&ghs, &5_000_i128, &2u32, &3600u64);
+    client.set_price(&kes, &800_i128, &4u32, &3600u64);
+    client.set_price(&ghs, &5_000_i128, &6u32, &3600u64);
 
     let assets = soroban_sdk::vec![&env, ngn.clone(), kes.clone(), ghs.clone()];
     let results = client.get_prices(&assets);
 
     assert_eq!(results.len(), 3);
     assert_eq!(results.get(0).unwrap().unwrap().price, 1_500_i128);
+    assert_eq!(results.get(0).unwrap().unwrap().decimals, 2u32);
     assert_eq!(results.get(1).unwrap().unwrap().price, 800_i128);
+    assert_eq!(results.get(1).unwrap().unwrap().decimals, 4u32);
     assert_eq!(results.get(2).unwrap().unwrap().price, 5_000_i128);
+    assert_eq!(results.get(2).unwrap().unwrap().decimals, 6u32);
 }
 
 #[test]
@@ -1100,4 +1339,323 @@ fn test_set_price_bounds_non_admin_rejected() {
 
     // non_admin should be rejected
     client.set_price_bounds(&non_admin, &symbol_short!("NGN"), &500_i128, &2_000_i128);
+}
+
+// ============================================================================
+// AssetAdded Event Tests
+// ============================================================================
+
+#[test]
+fn test_set_price_emits_asset_added_event_on_first_add() {
+    let env = Env::default();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let asset = symbol_short!("NGN");
+
+    // Set price for a new asset
+    client.set_price(&asset, &1_500_i128, &2u32, &3600u64);
+
+    // Verify AssetAdded event was emitted
+    let events = env.events().all();
+    let debug_str = alloc::format!("{:?}", events);
+    assert!(debug_str.contains("asset_added_event"), "AssetAdded event should be emitted for new asset");
+    assert!(debug_str.contains("symbol"), "Event should contain symbol field");
+    assert!(debug_str.contains("NGN"), "Event should contain the correct asset symbol");
+}
+
+#[test]
+fn test_set_price_does_not_emit_asset_added_event_on_update() {
+    let env = Env::default();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let asset = symbol_short!("NGN");
+
+    // First set - should emit AssetAdded
+    client.set_price(&asset, &1_500_i128, &2u32, &3600u64);
+
+    // Verify first event was emitted
+    let events_after_first = env.events().all();
+    let debug_str_first = alloc::format!("{:?}", events_after_first);
+    assert!(debug_str_first.contains("asset_added_event"), "Should emit AssetAdded on first set");
+
+    // Second set (update) - should NOT emit AssetAdded
+    env.ledger().set_timestamp(1_234_567_900);
+    client.set_price(&asset, &1_600_i128, &2u32, &3600u64);
+
+    // Verify no AssetAdded event on update (only the update event should be present if any)
+    let events_after_second = env.events().all();
+    let debug_str_second = alloc::format!("{:?}", events_after_second);
+    // Should NOT contain asset_added_event on update
+    assert!(!debug_str_second.contains("asset_added_event"), "Should NOT emit AssetAdded on update");
+}
+
+#[test]
+fn test_multiple_assets_added_sequentially_each_emits_event() {
+    let env = Env::default();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let ngn = symbol_short!("NGN");
+    let kes = symbol_short!("KES");
+    let ghs = symbol_short!("GHS");
+
+    // Add NGN - should emit AssetAdded
+    client.set_price(&ngn, &1_500_i128, &2u32, &3600u64);
+    let events_ngn = env.events().all();
+    let debug_ngn = alloc::format!("{:?}", events_ngn);
+    assert!(debug_ngn.contains("asset_added_event"), "Should emit AssetAdded for NGN");
+    assert!(debug_ngn.contains("NGN"), "Should contain NGN symbol");
+
+    // Add KES - should emit AssetAdded
+    client.set_price(&kes, &800_i128, &2u32, &3600u64);
+    let events_kes = env.events().all();
+    let debug_kes = alloc::format!("{:?}", events_kes);
+    assert!(debug_kes.contains("asset_added_event"), "Should emit AssetAdded for KES");
+    assert!(debug_kes.contains("KES"), "Should contain KES symbol");
+
+    // Add GHS - should emit AssetAdded
+    client.set_price(&ghs, &5_000_i128, &2u32, &3600u64);
+    let events_ghs = env.events().all();
+    let debug_ghs = alloc::format!("{:?}", events_ghs);
+    assert!(debug_ghs.contains("asset_added_event"), "Should emit AssetAdded for GHS");
+    assert!(debug_ghs.contains("GHS"), "Should contain GHS symbol");
+}
+
+#[test]
+fn test_mixed_add_and_update_emits_correct_events() {
+    let env = Env::default();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let ngn = symbol_short!("NGN");
+    let kes = symbol_short!("KES");
+
+    // Add NGN (new asset) - should emit AssetAdded
+    client.set_price(&ngn, &1_500_i128, &2u32, &3600u64);
+    let events_ngn = env.events().all();
+    let debug_ngn = alloc::format!("{:?}", events_ngn);
+    assert!(debug_ngn.contains("asset_added_event"), "Should emit AssetAdded for NGN");
+
+    // Add KES (new asset) - should emit AssetAdded
+    client.set_price(&kes, &800_i128, &2u32, &3600u64);
+    let events_kes = env.events().all();
+    let debug_kes = alloc::format!("{:?}", events_kes);
+    assert!(debug_kes.contains("asset_added_event"), "Should emit AssetAdded for KES");
+
+    // Update NGN (existing asset) - should NOT emit AssetAdded
+    env.ledger().set_timestamp(1_234_567_900);
+    client.set_price(&ngn, &1_600_i128, &2u32, &3600u64);
+    let events_update = env.events().all();
+    let debug_update = alloc::format!("{:?}", events_update);
+    assert!(!debug_update.contains("asset_added_event"), "Should NOT emit AssetAdded on update");
+
+    // Add GHS (new asset) - should emit AssetAdded
+    let ghs = symbol_short!("GHS");
+    client.set_price(&ghs, &5_000_i128, &2u32, &3600u64);
+    let events_ghs = env.events().all();
+    let debug_ghs = alloc::format!("{:?}", events_ghs);
+    assert!(debug_ghs.contains("asset_added_event"), "Should emit AssetAdded for GHS");
+}
+
+#[test]
+fn test_asset_added_event_contains_correct_symbol() {
+    let env = Env::default();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let asset = symbol_short!("NGN");
+
+    client.set_price(&asset, &1_500_i128, &2u32, &3600u64);
+
+    // Verify event structure contains the correct symbol
+    let events = env.events().all();
+    let debug_str = alloc::format!("{:?}", events);
+    assert!(debug_str.contains("asset_added_event"), "Should emit AssetAdded event");
+    assert!(debug_str.contains("NGN"), "Event should contain the correct asset symbol");
+}
+
+#[test]
+fn test_get_last_n_events_sliding_window() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+
+    let ngn = symbol_short!("NGN");
+    let kes = symbol_short!("KES");
+    let ghs = symbol_short!("GHS");
+
+    // Push 6 events - oldest should be dropped
+    client.set_price(&ngn, &100_i128, &2u32, &3600u64); // 1 (dropped)
+    client.set_price(&kes, &200_i128, &2u32, &3600u64); // 2
+    client.set_price(&ghs, &300_i128, &2u32, &3600u64); // 3
+    client.set_price(&ngn, &110_i128, &2u32, &3600u64); // 4
+    client.set_price(&kes, &210_i128, &2u32, &3600u64); // 5 
+    client.set_price(&ghs, &310_i128, &2u32, &3600u64); // 6 (newest)
+
+    let events = client.get_last_n_events(&5);
+    assert_eq!(events.len(), 5);
+
+    // Newest first (index 0) is an update because ghs was already added
+    assert_eq!(events.get(0).unwrap().asset, ghs);
+    assert_eq!(events.get(0).unwrap().price, 310_i128);
+    assert_eq!(events.get(0).unwrap().event_type, Symbol::new(&env, "price_updated"));
+
+    assert_eq!(events.get(1).unwrap().asset, kes);
+    assert_eq!(events.get(1).unwrap().price, 210_i128);
+
+    // Oldest in the log (index 4) should be the 2nd event pushed
+    assert_eq!(events.get(4).unwrap().asset, kes);
+    assert_eq!(events.get(4).unwrap().price, 200_i128);
+}
+
+// ============================================================================
+// Zero-Write Optimisation Tests (#132)
+// ============================================================================
+
+#[test]
+fn test_set_price_identical_value_only_updates_timestamp() {
+    let env = Env::default();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let asset = symbol_short!("NGN");
+
+    // Initial write
+    env.ledger().set_timestamp(1_000_000);
+    env.ledger().set_sequence_number(1);
+    client.set_price(&asset, &1_500_i128, &2u32, &3600u64);
+
+    let first = client.get_price(&asset);
+    assert_eq!(first.price, 1_500_i128);
+    assert_eq!(first.timestamp, 1_000_000);
+
+    // Second call with the same price — only timestamp should advance
+    env.ledger().set_timestamp(1_001_000);
+    env.ledger().set_sequence_number(2);
+    client.set_price(&asset, &1_500_i128, &2u32, &3600u64);
+
+    let second = client.get_price(&asset);
+    assert_eq!(second.price, 1_500_i128, "price must remain unchanged");
+    assert_eq!(second.timestamp, 1_001_000, "timestamp must be refreshed");
+}
+
+#[test]
+fn test_set_price_different_value_writes_new_price() {
+    let env = Env::default();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let asset = symbol_short!("KES");
+
+    env.ledger().set_timestamp(2_000_000);
+    env.ledger().set_sequence_number(1);
+    client.set_price(&asset, &800_i128, &2u32, &3600u64);
+
+    env.ledger().set_timestamp(2_001_000);
+    env.ledger().set_sequence_number(2);
+    client.set_price(&asset, &850_i128, &2u32, &3600u64);
+
+    let stored = client.get_price(&asset);
+    assert_eq!(stored.price, 850_i128, "new price must be stored");
+    assert_eq!(stored.timestamp, 2_001_000);
+}
+
+#[test]
+fn test_set_price_identical_value_still_emits_price_updated_event() {
+    let env = Env::default();
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let asset = symbol_short!("GHS");
+
+    env.ledger().set_timestamp(3_000_000);
+    env.ledger().set_sequence_number(1);
+    client.set_price(&asset, &5_000_i128, &2u32, &3600u64);
+
+    // Clear events by reading them, then do the identical-price call
+    env.ledger().set_timestamp(3_001_000);
+    env.ledger().set_sequence_number(2);
+    client.set_price(&asset, &5_000_i128, &2u32, &3600u64);
+
+    // price_updated event must still be logged so dashboards stay current
+    let events = env.events().all();
+    let debug_str = alloc::format!("{:?}", events);
+    assert!(
+        debug_str.contains("price_updated"),
+        "price_updated event must be emitted even when price is unchanged"
+    );
+}
+
+// ============================================================================
+// Renounce Ownership Tests
+// ============================================================================
+
+#[test]
+fn test_renounce_ownership_removes_admin_permanently() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    client.init_admin(&admin);
+    assert!(client.is_admin(&admin));
+
+    client.renounce_ownership(&admin);
+
+    assert!(!client.is_admin(&admin));
+    env.as_contract(&contract_id, || {
+        assert!(!crate::auth::_has_admin(&env));
+    });
+}
+
+#[test]
+fn test_renounce_ownership_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    client.init_admin(&admin);
+    client.renounce_ownership(&admin);
+
+    let events = env.events().all();
+    let debug_str = alloc::format!("{:?}", events);
+    assert!(debug_str.contains("ownership_renounced_event"));
+}
+
+#[test]
+#[should_panic(expected = "Unauthorised: caller is not in the authorized admin list")]
+fn test_renounce_ownership_rejects_non_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+    let non_admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    client.init_admin(&admin);
+    client.renounce_ownership(&non_admin);
+}
+
+#[test]
+#[should_panic(expected = "Unauthorised: caller is not in the authorized admin list")]
+fn test_renounce_ownership_blocks_admin_functions_after_renouncement() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(PriceOracle, ());
+    let client = PriceOracleClient::new(&env, &contract_id);
+    let admin = <soroban_sdk::Address as soroban_sdk::testutils::Address>::generate(&env);
+
+    client.init_admin(&admin);
+    client.renounce_ownership(&admin);
+
+    // Any admin-only function should now fail — upgrade is a convenient test target
+    let dummy_hash = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+    client.upgrade(&admin, &dummy_hash);
 }

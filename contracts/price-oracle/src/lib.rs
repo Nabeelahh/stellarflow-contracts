@@ -4,7 +4,7 @@ use soroban_sdk::{
     contract, contractclient, contracterror, contractimpl, panic_with_error, Address, Env, Symbol, String,
 };
 
-use crate::types::{DataKey, PriceBounds, PriceData, RecentEvent};
+use crate::types::{DataKey, PriceBounds, PriceData, PriceDataWithStatus, PriceEntryWithStatus, RecentEvent};
 
 const ADMIN_TIMELOCK: u64 = 86_400;
 
@@ -141,7 +141,7 @@ pub enum Error {
     /// Price change exceeds maximum allowed threshold (flash crash protection).
     FlashCrashDetected = 5,
     /// Caller is not authorized to perform this action.
-    NotAuthorized = 5,
+    NotAuthorized = 13,
     /// Contract or admin has already been initialized.
     AlreadyInitialized = 6,
     /// Price change exceeds the allowed delta limit in a single update.
@@ -156,6 +156,8 @@ pub enum Error {
     MaxAdminsReached = 11,
     /// Cannot remove admin - would leave contract without any admins.
     CannotRemoveLastAdmin = 12,
+    /// Contract has been destroyed and is no longer usable.
+    ContractDestroyed = 14,
 }
 
 #[contract]
@@ -189,6 +191,24 @@ pub struct AssetAddedEvent {
 #[soroban_sdk::contractevent]
 pub struct OwnershipRenouncedEvent {
     pub previous_admin: Address,
+}
+
+#[soroban_sdk::contractevent]
+pub struct RescueTokensEvent {
+    pub token: Address,
+    pub recipient: Address,
+    pub amount: i128,
+}
+
+#[soroban_sdk::contractevent]
+pub struct ContractDestroyedEvent {
+    pub admin1: Address,
+    pub admin2: Address,
+}
+
+#[contractclient(name = "TokenContractClient")]
+pub trait TokenContractInterface {
+    fn transfer(env: Env, from: Address, to: Address, amount: i128);
 }
 
 /// Returns the signed percentage change in basis points.
@@ -239,6 +259,13 @@ fn is_valid(price: i128) -> bool {
 
 fn is_whitelisted_provider(env: &Env, source: &Address) -> bool {
     crate::auth::_is_provider(env, source)
+}
+
+/// Panic if the contract has been destroyed.
+fn _require_not_destroyed(env: &Env) {
+    if env.storage().instance().has(&DataKey::Destroyed) {
+        panic_with_error!(env, Error::ContractDestroyed);
+    }
 }
 
 /// Check if a price entry is stale based on its TTL.
@@ -307,6 +334,7 @@ impl PriceOracle {
     /// Initialize the contract with admin and base currency pairs.
     /// Can only be called once.
     pub fn initialize(env: Env, admin: Address, base_currency_pairs: soroban_sdk::Vec<Symbol>) {
+        _require_not_destroyed(&env);
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
@@ -332,6 +360,7 @@ impl PriceOracle {
     }
 
     pub fn init_admin(env: Env, admin: Address) {
+        _require_not_destroyed(&env);
         if env.storage().instance().has(&DataKey::Initialized) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
@@ -356,6 +385,7 @@ impl PriceOracle {
     ///
     /// The new asset is added to the internal asset list and initialized with a zero-price placeholder.
     pub fn add_asset(env: Env, admin: Address, asset: Symbol) -> Result<(), Error> {
+        _require_not_destroyed(&env);
         admin.require_auth();
         crate::auth::_require_authorized(&env, &admin);
 
@@ -401,6 +431,7 @@ impl PriceOracle {
 
     /// Starts an admin transfer by storing the pending admin and timestamp.
     pub fn transfer_admin(env: Env, current_admin: Address, new_admin: Address) {
+        _require_not_destroyed(&env);
         current_admin.require_auth();
         crate::auth::_require_authorized(&env, &current_admin);
 
@@ -414,6 +445,7 @@ impl PriceOracle {
 
     /// Finalizes the admin transfer after the timelock expires.
     pub fn accept_admin(env: Env, new_admin: Address) {
+        _require_not_destroyed(&env);
         new_admin.require_auth();
 
         let pending: Address = env
@@ -457,6 +489,7 @@ impl PriceOracle {
     /// No admin-only functions (upgrade, add_asset, set_price_bounds, etc.)
     /// will ever be callable again. This action is irreversible.
     pub fn renounce_ownership(env: Env, admin: Address) {
+        _require_not_destroyed(&env);
         admin.require_auth();
         crate::auth::_require_authorized(&env, &admin);
 
@@ -609,6 +642,7 @@ impl PriceOracle {
     ///
     /// Only the admin can call this.
     pub fn set_asset_description(env: Env, admin: Address, asset: Symbol, description: soroban_sdk::String) {
+        _require_not_destroyed(&env);
         admin.require_auth();
         crate::auth::_require_authorized(&env, &admin);
         env.storage()
@@ -641,6 +675,7 @@ impl PriceOracle {
     /// * `decimals` - Number of decimals for the price
     /// * `ttl` - Time-to-live in seconds for this price (per-asset expiration)
     pub fn set_price(env: Env, asset: Symbol, val: i128, decimals: u32, ttl: u64) {
+        _require_not_destroyed(&env);
         if !is_valid(val) {
             panic_with_error!(&env, Error::InvalidPrice);
         }
@@ -697,6 +732,7 @@ impl PriceOracle {
     ///
     /// Admin-only function to move trapped XLM or other assets out of the contract.
     pub fn rescue_tokens(env: Env, admin: Address, token: Address, to: Address, amount: i128) {
+        _require_not_destroyed(&env);
         admin.require_auth();
         crate::auth::_require_authorized(&env, &admin);
 
@@ -719,6 +755,7 @@ impl PriceOracle {
     /// Replaces the on-chain WASM bytecode with the provided hash while preserving
     /// all contract storage. Strictly restricted to the admin.
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
+        _require_not_destroyed(&env);
         admin.require_auth();
         crate::auth::_require_authorized(&env, &admin);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
@@ -729,6 +766,7 @@ impl PriceOracle {
     /// Only the admin can call this. Returns `Error::AssetNotFound` if the asset
     /// is not currently tracked.
     pub fn remove_asset(env: Env, admin: Address, asset: Symbol) -> Result<(), Error> {
+        _require_not_destroyed(&env);
         admin.require_auth();
         crate::auth::_require_authorized(&env, &admin);
 
@@ -766,6 +804,7 @@ impl PriceOracle {
         confidence_score: u32,
         ttl: u64,
     ) -> Result<(), Error> {
+        _require_not_destroyed(&env);
         source.require_auth();
 
         if !get_tracked_assets(&env).contains(&asset) {
@@ -796,6 +835,9 @@ impl PriceOracle {
                 if pct_change_bps > MAX_PERCENT_CHANGE_BPS {
                     return Err(Error::FlashCrashDetected);
                 }
+            }
+        }
+
         if old_price != 0 {
             let delta = (price - old_price).unsigned_abs();
             if delta > 50 {
@@ -846,6 +888,7 @@ impl PriceOracle {
         min_price: i128,
         max_price: i128,
     ) {
+        _require_not_destroyed(&env);
         admin.require_auth();
         crate::auth::_require_authorized(&env, &admin);
 
@@ -924,6 +967,7 @@ impl PriceOracle {
     /// # Returns
     /// The new pause state (true = paused, false = unpaused)
     pub fn toggle_pause(env: Env, admin1: Address, admin2: Address) -> Result<bool, Error> {
+        _require_not_destroyed(&env);
         // Require both admins to provide cryptographic signatures
         admin1.require_auth();
         admin2.require_auth();
@@ -970,6 +1014,7 @@ impl PriceOracle {
     /// # Returns
     /// Ok(()) if successful, Error if validation fails
     pub fn register_admin(env: Env, admin1: Address, admin2: Address, new_admin: Address) -> Result<(), Error> {
+        _require_not_destroyed(&env);
         // Require both existing admins to provide cryptographic signatures
         admin1.require_auth();
         admin2.require_auth();
@@ -1014,6 +1059,7 @@ impl PriceOracle {
     /// # Returns
     /// Ok(()) if successful, Error if validation fails
     pub fn remove_admin(env: Env, admin1: Address, admin2: Address, admin_to_remove: Address) -> Result<(), Error> {
+        _require_not_destroyed(&env);
         // Require both existing admins to provide cryptographic signatures
         admin1.require_auth();
         admin2.require_auth();
@@ -1048,6 +1094,57 @@ impl PriceOracle {
         env.events().publish(
             (Symbol::new(&env, "admin_removed"),),
             (admin1.clone(), admin2.clone(), admin_to_remove.clone()),
+        );
+
+        Ok(())
+    }
+
+    /// Irreversibly destroy the contract, clearing all state and rendering it unusable.
+    ///
+    /// Requires 2-of-3 admin signatures (same multisig threshold as other critical ops).
+    /// This is the terminal migration kill-switch — after this call the contract
+    /// can never be used again. All storage is wiped and a destroyed flag is set.
+    pub fn self_destruct(env: Env, admin1: Address, admin2: Address) -> Result<(), Error> {
+        _require_not_destroyed(&env);
+        admin1.require_auth();
+        admin2.require_auth();
+
+        if admin1 == admin2 {
+            return Err(Error::MultiSigValidationFailed);
+        }
+
+        crate::auth::_require_authorized(&env, &admin1);
+        crate::auth::_require_authorized(&env, &admin2);
+
+        let admins = crate::auth::_get_admin(&env);
+        let admin_count = admins.len();
+
+        if admin_count < 2 {
+            return Err(Error::MultiSigValidationFailed);
+        }
+
+        // Wipe all known instance storage
+        env.storage().instance().remove(&DataKey::Admin);
+        env.storage().instance().remove(&DataKey::BaseCurrencyPairs);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage().instance().remove(&DataKey::PendingAdminTimestamp);
+        env.storage().instance().remove(&DataKey::AdminUpdateTimestamp);
+        env.storage().instance().remove(&DataKey::RecentEvents);
+        env.storage().instance().remove(&DataKey::Initialized);
+        crate::auth::_remove_paused(&env);
+
+        // Wipe temporary and persistent price/bounds data
+        env.storage().temporary().remove(&DataKey::PriceData);
+        env.storage().temporary().remove(&DataKey::PriceBoundsData);
+        env.storage().persistent().remove(&DataKey::PriceData);
+        env.storage().persistent().remove(&DataKey::PriceBoundsData);
+
+        // Set the destroyed flag so the contract is permanently unusable
+        env.storage().instance().set(&DataKey::Destroyed, &true);
+
+        env.events().publish(
+            (Symbol::new(&env, "contract_destroyed"),),
+            (admin1.clone(), admin2.clone()),
         );
 
         Ok(())

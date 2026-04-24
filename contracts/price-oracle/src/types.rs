@@ -12,6 +12,8 @@ pub enum DataKey {
     AdminUpdateTimestamp,
     RecentEvents,
     Initialized,
+    AssetDescription(Symbol),
+    Destroyed,
 }
 
 /// Canonical storage format for a price entry.

@@ -529,6 +529,7 @@ impl PriceOracle {
     }
 
     /// Add a new asset to the tracked asset list.
+    /// Add a new asset to the tracked asset list.
     ///
     /// The new asset is added to the internal asset list and initialized with a zero-price placeholder
     /// in the `VerifiedPrice` bucket.
@@ -559,6 +560,40 @@ impl PriceOracle {
         log_event(&env, Symbol::new(&env, "asset_added"), asset, 0);
 
         Ok(())
+    }
+
+    /// Register the native decimal precision for an asset pair.
+    ///
+    /// Stores `base_decimals` and `quote_decimals` in persistent storage so that
+    /// all subsequent price submissions for this asset are automatically normalized
+    /// to 9 fixed-point decimals on entry.
+    ///
+    /// Only the admin can call this. Should be called once per asset after `add_asset`.
+    pub fn set_asset_decimals(
+        env: Env,
+        admin: Address,
+        asset: Symbol,
+        base_decimals: u32,
+        quote_decimals: u32,
+    ) {
+        _require_not_destroyed(&env);
+        admin.require_auth();
+        crate::auth::_require_authorized(&env, &admin);
+
+        env.storage().persistent().set(
+            &DataKey::AssetMeta(asset),
+            &AssetMeta { base_decimals, quote_decimals },
+        );
+    }
+
+    /// Get the decimal metadata for an asset.
+    ///
+    /// Returns the `AssetMeta` containing `base_decimals` and `quote_decimals`
+    /// registered via `set_asset_decimals`.
+    pub fn get_asset_meta(env: Env, asset: Symbol) -> Option<AssetMeta> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AssetMeta(asset))
     }
 
     /// Return the current admin addresses.
@@ -837,7 +872,11 @@ impl PriceOracle {
             if !is_valid(val) {
                 return Err(Error::InvalidPrice);
             }
-            if let Err(err) = enforce_price_floor(&env, &asset, val) {
+
+            // Normalize the raw price to 9 fixed-point decimals on entry.
+            let normalized = normalize_price(&env, &asset, val);
+
+            if let Err(err) = enforce_price_floor(&env, &asset, normalized) {
                 return Err(err);
             }
 
@@ -862,10 +901,11 @@ impl PriceOracle {
             }
 
             let price_data = PriceData {
-                price: val,
+                price: normalized,
                 timestamp: now,
                 provider: env.current_contract_address(),
-                decimals,
+                // All stored prices are 9-decimal normalized.
+                decimals: 9,
                 confidence_score: 100,
                 ttl,
             };
@@ -874,12 +914,12 @@ impl PriceOracle {
 
             if is_new_asset {
                 env.events().publish_event(&AssetAddedEvent { symbol: asset.clone() });
-                log_event(&env, Symbol::new(&env, "asset_added"), asset, val);
+                log_event(&env, Symbol::new(&env, "asset_added"), asset, normalized);
             } else {
-                log_event(&env, Symbol::new(&env, "price_updated"), asset.clone(), val);
+                log_event(&env, Symbol::new(&env, "price_updated"), asset.clone(), normalized);
                 env.events().publish_event(&PriceUpdatedEvent {
                     asset: asset.clone(),
-                    price: val,
+                    price: normalized,
                 });
             }
             
@@ -939,12 +979,16 @@ impl PriceOracle {
             return Err(Error::InvalidPrice);
         }
 
+        // Normalize the raw price to 9 fixed-point decimals on entry.
+        let normalized = normalize_price(&env, &asset, price);
+
         let now = env.ledger().timestamp();
         let price_data = PriceData {
-            price,
+            price: normalized,
             timestamp: now,
             provider: source,
-            decimals,
+            // All stored prices are 9-decimal normalized.
+            decimals: 9,
             confidence_score: 0,
             ttl,
         };
@@ -953,7 +997,7 @@ impl PriceOracle {
             .temporary()
             .set(&DataKey::CommunityPrice(asset.clone()), &price_data);
 
-        log_event(&env, Symbol::new(&env, "community_price"), asset, price);
+        log_event(&env, Symbol::new(&env, "community_price"), asset, normalized);
 
         Ok(())
     }
@@ -1051,6 +1095,9 @@ impl PriceOracle {
             return Err(Error::NotAuthorized);
         }
 
+        // Normalize the raw price to 9 fixed-point decimals on entry.
+        let normalized = normalize_price(&env, &asset, price);
+
         // Get the current buffer for this asset
         let mut buffer = get_price_buffer(&env, asset.clone());
         
@@ -1069,7 +1116,7 @@ impl PriceOracle {
             .unwrap_or(0);
 
         if old_price > 0 {
-            if let Some(pct_change_bps) = calculate_percentage_difference_bps(old_price, price) {
+            if let Some(pct_change_bps) = calculate_percentage_difference_bps(old_price, normalized) {
                 if pct_change_bps > MAX_PERCENT_CHANGE_BPS {
                     return Err(Error::FlashCrashDetected);
                 }
@@ -1077,19 +1124,19 @@ impl PriceOracle {
         }
 
         if old_price != 0 {
-            let delta = (price - old_price).unsigned_abs();
+            let delta = (normalized - old_price).unsigned_abs();
             if delta > 50 {
                 env.events().publish_event(&PriceAnomalyEvent {
                     asset: asset.clone(),
                     previous_price: old_price,
-                    attempted_price: price,
+                    attempted_price: normalized,
                     delta,
                 });
                 // Still allow the submission even if anomaly detected
             }
         }
 
-        enforce_price_floor(&env, &asset, price)?;
+        enforce_price_floor(&env, &asset, normalized)?;
 
         let storage = env.storage().persistent();
         let bounds_map: soroban_sdk::Map<Symbol, PriceBounds> = storage
@@ -1097,26 +1144,27 @@ impl PriceOracle {
             .unwrap_or_else(|| soroban_sdk::Map::new(&env));
         
         if let Some(bounds) = bounds_map.get(asset.clone()) {
-            if price < bounds.min_price || price > bounds.max_price {
+            if normalized < bounds.min_price || normalized > bounds.max_price {
                 return Err(Error::PriceOutOfBounds);
             }
         }
 
-        // Add the new price entry to the buffer
+        // Add the normalized price entry to the buffer
         let entry = PriceBufferEntry {
-            price,
+            price: normalized,
             provider: source.clone(),
             timestamp: env.ledger().timestamp(),
         };
         buffer.entries.push_back(entry);
-        buffer.decimals = decimals;
+        // Buffer decimals are always 9 after normalization.
+        buffer.decimals = 9;
         buffer.ttl = ttl;
 
         // Save the updated buffer
         set_price_buffer(&env, asset.clone(), &buffer);
 
         // Calculate the new median and store it as the canonical price
-        let median_price = calculate_median_from_buffer(&env, &buffer).unwrap_or(price);
+        let median_price = calculate_median_from_buffer(&env, &buffer).unwrap_or(normalized);
         
         // Also update the legacy PriceData for backward compatibility
         let mut prices: soroban_sdk::Map<Symbol, PriceData> = storage
@@ -1127,7 +1175,8 @@ impl PriceOracle {
             price: median_price,
             timestamp: env.ledger().timestamp(),
             provider: source,
-            decimals,
+            // All stored prices are 9-decimal normalized.
+            decimals: 9,
             confidence_score,
             ttl,
         };
@@ -1135,8 +1184,8 @@ impl PriceOracle {
         storage.set(&key, &price_data);
         update_twap(&env, asset.clone(), median_price, env.ledger().timestamp());
 
-        env.events().publish_event(&PriceUpdatedEvent { asset: asset.clone(), price });
-        log_event(&env, Symbol::new(&env, "price_updated"), asset, price);
+        env.events().publish_event(&PriceUpdatedEvent { asset: asset.clone(), price: normalized });
+        log_event(&env, Symbol::new(&env, "price_updated"), asset, normalized);
 
         Ok(())
     }

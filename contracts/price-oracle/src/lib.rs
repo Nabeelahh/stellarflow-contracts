@@ -59,6 +59,11 @@ pub trait StellarFlowTrait {
     /// Returns the number of unique assets that are currently being tracked by the oracle.
     fn get_asset_count(env: Env) -> u32;
 
+    /// Get the Time-Weighted Average Price (TWAP) for a specific asset.
+    ///
+    /// Returns the simple average of the last 10 price updates, or `None` if no data.
+    fn get_twap(env: Env, asset: Symbol) -> Option<i128>;
+
     /// Add a new asset to the tracked asset list.
     ///
     /// The new asset is added to the internal asset list and initialized with a zero-price placeholder.
@@ -453,21 +458,21 @@ fn enforce_price_floor(env: &Env, asset: &Symbol, price: i128) -> Result<(), Err
     Ok(())
 }
 
-/// Helper function to log admin actions to persistent storage.
-fn _log_admin_action(env: &Env, admin: &Address, action: AdminAction, details: Option<String>) {
-    let storage = env.storage().persistent();
-    let mut counter: u32 = storage.get(&DataKey::AuditLogCounter).unwrap_or(0);
-    counter = counter.checked_add(1).expect("Audit log counter overflow"); // Prevent overflow
+fn update_twap(env: &Env, asset: Symbol, price: i128, timestamp: u64) {
+    let key = DataKey::Twap(asset);
+    let mut twap_buffer: soroban_sdk::Vec<(u64, i128)> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env));
 
-    let log_entry = AdminLogEntry {
-        id: counter,
-        action,
-        admin: admin.clone(),
-        timestamp: env.ledger().timestamp(),
-        details,
-    };
-    storage.set(&DataKey::AuditLog(counter), &log_entry);
-    storage.set(&DataKey::AuditLogCounter, &counter);
+    twap_buffer.push_back((timestamp, price));
+
+    if twap_buffer.len() > 10 {
+        twap_buffer.pop_front();
+    }
+
+    env.storage().persistent().set(&key, &twap_buffer);
 }
 
 #[contractimpl]
@@ -845,15 +850,15 @@ impl PriceOracle {
 
             let now = env.ledger().timestamp();
 
-            if let Some(mut current) = existing {
-                if current.price == val {
-                    // Price unchanged — only refresh the timestamp (zero-write optimisation).
-                    current.timestamp = now;
-                    storage.set(&key, &current);
-                    env.events().publish_event(&PriceUpdatedEvent { asset: asset.clone(), price: val });
-                    log_event(&env, Symbol::new(&env, "price_updated"), asset, val);
-                    return Ok(());
-                }
+        if let Some(mut current) = existing {
+            if current.price == val {
+                // Price unchanged — only refresh the timestamp (zero-write optimisation).
+                current.timestamp = now;
+                storage.set(&key, &current);
+                update_twap(&env, asset.clone(), val, now);
+                env.events().publish_event(&PriceUpdatedEvent { asset: asset.clone(), price: val });
+                log_event(&env, Symbol::new(&env, "price_updated"), asset, val);
+                return;
             }
 
             let price_data = PriceData {
@@ -897,6 +902,7 @@ impl PriceOracle {
         };
 
         storage.set(&key, &price_data);
+        update_twap(&env, asset.clone(), val, now);
 
         if is_new_asset {
             env.events().publish_event(&AssetAddedEvent { symbol: asset.clone() });
@@ -1127,6 +1133,7 @@ impl PriceOracle {
         };
 
         storage.set(&key, &price_data);
+        update_twap(&env, asset.clone(), median_price, env.ledger().timestamp());
 
         env.events().publish_event(&PriceUpdatedEvent { asset: asset.clone(), price });
         log_event(&env, Symbol::new(&env, "price_updated"), asset, price);
@@ -1467,22 +1474,25 @@ impl PriceOracle {
         buffer.entries.len()
     }
 
-    /// Get the health status of the oracle for the Admin Dashboard.
-    ///
-    /// This is a read-only function that aggregates data from 4 different storage keys
-    /// into one single return object for efficient dashboard queries.
-    pub fn get_oracle_health(env: Env) -> crate::types::OracleHealth {
-        let active_relayers = crate::auth::_get_active_relayers(&env).len();
-        let paused = crate::auth::_is_paused(&env);
-        let total_assets = get_tracked_assets(&env).len();
-        let last_ledger = env.ledger().sequence();
+    /// Get the Time-Weighted Average Price (TWAP) for a specific asset.
+    pub fn get_twap(env: Env, asset: Symbol) -> Option<i128> {
+        let key = DataKey::Twap(asset);
+        let twap_buffer: soroban_sdk::Vec<(u64, i128)> = env
+            .storage()
+            .persistent()
+            .get(&key)?;
 
-        crate::types::OracleHealth {
-            active_relayers,
-            paused,
-            total_assets,
-            last_ledger,
+        let len = twap_buffer.len();
+        if len == 0 {
+            return None;
         }
+
+        let mut sum: i128 = 0;
+        for (_, price) in twap_buffer.iter() {
+            sum += price;
+        }
+
+        Some(sum / (len as i128))
     }
 }
 

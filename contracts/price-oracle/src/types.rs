@@ -1,6 +1,7 @@
 use soroban_sdk::{contracttype, Address, Symbol};
 
 /// Storage keys for contract data
+#[allow(clippy::enum_variant_names)] // Soroban SDK generates these names
 #[contracttype]
 pub enum DataKey {
     Admin,
@@ -110,4 +111,37 @@ pub struct PriceBuffer {
     pub decimals: u32,
     /// Time-to-live in seconds for this buffer.
     pub ttl: u64,
+}
+
+/// Enum representing different types of admin actions that can be logged.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AdminAction {
+    Initialize,
+    InitAdmin,
+    AddAsset,
+    RemoveAsset,
+    SetPriceFloor,
+    SetPriceBounds,
+    SetAssetDescription,
+    TransferAdminInitiated,
+    TransferAdminAccepted,
+    RenounceOwnership,
+    RescueTokens,
+    Upgrade,
+    TogglePause,
+    RegisterAdmin,
+    RemoveAdmin,
+    SelfDestruct,
+}
+
+/// Structure for an entry in the persistent admin action audit log.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminLogEntry {
+    pub id: u32,
+    pub action: AdminAction,
+    pub admin: Address,
+    pub timestamp: u64,
+    pub details: Option<String>, // Generic string for additional context
 }

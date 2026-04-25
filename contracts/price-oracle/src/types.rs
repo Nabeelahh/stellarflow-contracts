@@ -16,7 +16,8 @@ pub enum DataKey {
     AdminUpdateTimestamp,
     RecentEvents,
     Initialized,
-    AssetDescription(Symbol),
+    /// TWAP Buffer: Stores last 10 (Timestamp, Price) updates.
+    Twap(Symbol),
     /// Verified price bucket: written only by whitelisted providers / admins.
     /// Internal math and `get_price` default to this bucket.
     VerifiedPrice(Symbol),

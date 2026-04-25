@@ -60,6 +60,11 @@ pub trait StellarFlowTrait {
     /// Returns the number of unique assets that are currently being tracked by the oracle.
     fn get_asset_count(env: Env) -> u32;
 
+    /// Get the Time-Weighted Average Price (TWAP) for a specific asset.
+    ///
+    /// Returns the simple average of the last 10 price updates, or `None` if no data.
+    fn get_twap(env: Env, asset: Symbol) -> Option<i128>;
+
     /// Add a new asset to the tracked asset list.
     ///
     /// The new asset is added to the internal asset list and initialized with a zero-price placeholder.
@@ -452,6 +457,23 @@ fn enforce_price_floor(env: &Env, asset: &Symbol, price: i128) -> Result<(), Err
     Ok(())
 }
 
+fn update_twap(env: &Env, asset: Symbol, price: i128, timestamp: u64) {
+    let key = DataKey::Twap(asset);
+    let mut twap_buffer: soroban_sdk::Vec<(u64, i128)> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+
+    twap_buffer.push_back((timestamp, price));
+
+    if twap_buffer.len() > 10 {
+        twap_buffer.pop_front();
+    }
+
+    env.storage().persistent().set(&key, &twap_buffer);
+}
+
 #[contractimpl]
 impl PriceOracle {
     /// Initialize the contract with admin and base currency pairs.
@@ -814,6 +836,7 @@ impl PriceOracle {
                 // Price unchanged — only refresh the timestamp (zero-write optimisation).
                 current.timestamp = now;
                 storage.set(&key, &current);
+                update_twap(&env, asset.clone(), val, now);
                 env.events().publish_event(&PriceUpdatedEvent { asset: asset.clone(), price: val });
                 log_event(&env, Symbol::new(&env, "price_updated"), asset, val);
                 return;
@@ -830,6 +853,7 @@ impl PriceOracle {
         };
 
         storage.set(&key, &price_data);
+        update_twap(&env, asset.clone(), val, now);
 
         if is_new_asset {
             env.events().publish_event(&AssetAddedEvent { symbol: asset.clone() });
@@ -1057,6 +1081,7 @@ impl PriceOracle {
         };
 
         storage.set(&key, &price_data);
+        update_twap(&env, asset.clone(), median_price, env.ledger().timestamp());
 
         env.events().publish_event(&PriceUpdatedEvent { asset: asset.clone(), price });
         log_event(&env, Symbol::new(&env, "price_updated"), asset, price);
@@ -1389,6 +1414,27 @@ impl PriceOracle {
     pub fn get_relayer_count(env: Env, asset: Symbol) -> u32 {
         let buffer = get_price_buffer(&env, asset);
         buffer.entries.len()
+    }
+
+    /// Get the Time-Weighted Average Price (TWAP) for a specific asset.
+    pub fn get_twap(env: Env, asset: Symbol) -> Option<i128> {
+        let key = DataKey::Twap(asset);
+        let twap_buffer: soroban_sdk::Vec<(u64, i128)> = env
+            .storage()
+            .persistent()
+            .get(&key)?;
+
+        let len = twap_buffer.len();
+        if len == 0 {
+            return None;
+        }
+
+        let mut sum: i128 = 0;
+        for (_, price) in twap_buffer.iter() {
+            sum += price;
+        }
+
+        Some(sum / (len as i128))
     }
 }
 

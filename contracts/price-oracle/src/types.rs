@@ -114,3 +114,17 @@ pub struct PriceBuffer {
     /// Time-to-live in seconds for this buffer.
     pub ttl: u64,
 }
+
+/// Health status of the oracle for the Admin Dashboard.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleHealth {
+    /// Number of active relayers (whitelisted providers).
+    pub active_relayers: u32,
+    /// Whether the contract is currently paused.
+    pub paused: bool,
+    /// Total number of tracked assets.
+    pub total_assets: u32,
+    /// Current ledger sequence number.
+    pub last_ledger: u32,
+}

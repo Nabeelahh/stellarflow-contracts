@@ -320,7 +320,6 @@ pub fn _get_required_threshold(env: &Env) -> u32 {
 // ─────────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod auth_tests {
-    extern crate alloc;
     use super::*;
     use soroban_sdk::{contract, contractimpl};
 

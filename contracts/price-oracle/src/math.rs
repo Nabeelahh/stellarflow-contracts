@@ -13,6 +13,7 @@ use soroban_sdk::{Env, String};
 /// format_price(env, 1,     0)  => "1"
 /// format_price(env, 0,     2)  => "0.00"
 /// ```
+
 // pub fn format_price(env: &Env, price: i128, decimals: u32) -> String {
 //     // --- 1. Convert the absolute value to ASCII digits in a fixed buffer ------
 //     // i128::MAX is 39 digits; 1 sign + 39 digits + 1 dot + 1 NUL = 42 bytes is safe.
@@ -167,6 +168,7 @@ pub fn calculate_inverse_price(price: i128, decimals: u32) -> Option<i128> {
 mod tests {
     use super::*;
     use soroban_sdk::Env;
+    feat/190-multi-asset-index-price
 
     // --- format_price tests ---------------------------------------------------
 
